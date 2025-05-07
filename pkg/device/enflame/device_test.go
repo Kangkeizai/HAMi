@@ -18,9 +18,7 @@ package enflame
 
 import (
 	"flag"
-	"strconv"
 	"testing"
-	"time"
 
 	"github.com/Project-HAMi/HAMi/pkg/util"
 
@@ -43,22 +41,19 @@ func TestGetNodeDevices(t *testing.T) {
 			node: corev1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test",
-				},
-				Status: corev1.NodeStatus{
-					Capacity: corev1.ResourceList{
-						corev1.ResourceName(CountNoSharedName):  *resource.NewQuantity(1, resource.DecimalSI),
-						corev1.ResourceName(SharedResourceName): *resource.NewQuantity(6, resource.DecimalSI),
+					Annotations: map[string]string{
+						NodeRegisterAnnos: `[{"id":"0","count":6,"devmem":49152,"devcore":24,"type":"S60"}]`,
 					},
 				},
 			},
 			expected: []*util.DeviceInfo{
 				{
 					Index:   0,
-					ID:      "test-enflame-0",
-					Count:   100,
-					Devmem:  100,
-					Devcore: 100,
-					Type:    EnflameGPUDevice,
+					ID:      "0",
+					Count:   6,
+					Devmem:  49152,
+					Devcore: 24,
+					Type:    "S60",
 					Numa:    0,
 					Health:  true,
 				},
@@ -130,9 +125,6 @@ func TestPatchAnnotations(t *testing.T) {
 			},
 			expected: map[string]string{
 				util.SupportDevices[EnflameGPUDevice]: "k8s-gpu-enflame-0,Enflame,0,0:;",
-				PodHasAssignedGCU:                     "false",
-				PodAssignedGCUTime:                    strconv.FormatInt(time.Now().UnixNano(), 10),
-				PodAssignedGCUID:                      "0",
 			},
 		},
 	}
@@ -153,13 +145,6 @@ func TestPatchAnnotations(t *testing.T) {
 			}
 
 			for k, v := range tt.expected {
-				if k == PodAssignedGCUTime {
-					if len(got[k]) != len(v) {
-						t.Errorf("Expected %s %s, got %s", k, v, got[k])
-					}
-					continue
-				}
-
 				if got[k] != v {
 					t.Errorf("Expected %s %s, got %s", k, v, got[k])
 				}
@@ -187,8 +172,9 @@ func Test_MutateAdmission(t *testing.T) {
 				ctr: &corev1.Container{
 					Resources: corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
-							"enflame.com/vgcu":            *resource.NewQuantity(1, resource.DecimalSI),
-							"enflame.com/vgcu-percentage": *resource.NewQuantity(15, resource.DecimalSI),
+							"enflame.com/vgcu":        *resource.NewQuantity(1, resource.DecimalSI),
+							"enflame.com/vgcu-memory": *resource.NewQuantity(10, resource.DecimalSI),
+							"enflame.com/vgcu-core":   *resource.NewQuantity(5, resource.DecimalSI),
 						},
 						Requests: corev1.ResourceList{},
 					},
@@ -201,18 +187,23 @@ func Test_MutateAdmission(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			config := EnflameConfig{
-				ResourceCountName:      "enflame.com/vgcu",
-				ResourcePercentageName: "enflame.com/vgcu-percentage",
+				ResourceCountName:  "enflame.com/vgcu",
+				ResourceMemoryName: "enflame.com/vgcu-memory",
+				ResourceCoreName:   "enflame.com/vgcu-core",
 			}
 			InitEnflameDevice(config)
-			dev := EnflameDevices{
-				factor: 4,
-			}
+			dev := EnflameDevices{}
 			result, _ := dev.MutateAdmission(test.args.ctr, test.args.p)
 			assert.Equal(t, result, test.want)
-			limits := test.args.ctr.Resources.Limits[corev1.ResourceName(EnflameResourcePercentage)]
+			limits := test.args.ctr.Resources.Limits[corev1.ResourceName(EnflameResourceCount)]
 			number, _ := limits.AsInt64()
-			assert.Equal(t, number, int64(25))
+			assert.Equal(t, number, 1)
+			memory := test.args.ctr.Resources.Limits[corev1.ResourceName(EnflameResourceMemory)]
+			memoryNumber, _ := memory.AsInt64()
+			assert.Equal(t, memoryNumber, 10)
+			core := test.args.ctr.Resources.Limits[corev1.ResourceName(EnflameResourceCore)]
+			coreNumber, _ := core.AsInt64()
+			assert.Equal(t, coreNumber, 5)
 		})
 	}
 }
@@ -378,21 +369,23 @@ func Test_GenerateResourceRequests(t *testing.T) {
 			args: &corev1.Container{
 				Resources: corev1.ResourceRequirements{
 					Limits: corev1.ResourceList{
-						"enflame.com/vgcu":            resource.MustParse("1"),
-						"enflame.com/vgcu-percentage": resource.MustParse("15"),
+						"enflame.com/vgcu":        resource.MustParse("1"),
+						"enflame.com/vgcu-memory": resource.MustParse("10"),
+						"enflame.com/vgcu-core":   resource.MustParse("5"),
 					},
 					Requests: corev1.ResourceList{
-						"enflame.com/vgcu":            resource.MustParse("1"),
-						"enflame.com/vgcu-percentage": resource.MustParse("15"),
+						"enflame.com/vgcu":        resource.MustParse("1"),
+						"enflame.com/vgcu-memory": resource.MustParse("10"),
+						"enflame.com/vgcu-core":   resource.MustParse("5"),
 					},
 				},
 			},
 			want: util.ContainerDeviceRequest{
 				Nums:             int32(1),
 				Type:             EnflameGPUDevice,
-				Memreq:           int32(15),
+				Memreq:           int32(10),
 				MemPercentagereq: int32(0),
-				Coresreq:         int32(0),
+				Coresreq:         int32(5),
 			},
 		},
 		{
@@ -420,15 +413,15 @@ func Test_GenerateResourceRequests(t *testing.T) {
 			want: util.ContainerDeviceRequest{
 				Nums:             int32(1),
 				Type:             EnflameGPUDevice,
-				Memreq:           int32(100),
-				MemPercentagereq: int32(0),
+				Memreq:           int32(0),
+				MemPercentagereq: int32(100),
 				Coresreq:         int32(0),
 			},
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			dev := EnflameDevices{factor: 4}
+			dev := EnflameDevices{}
 			fs := flag.FlagSet{}
 			ParseConfig(&fs)
 			result := dev.GenerateResourceRequests(test.args)
